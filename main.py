@@ -29,18 +29,37 @@ app = FastAPI()
 with open("shl_product_catalog.json", "r", encoding="utf-8") as f:
     CATALOG = json.load(f)
 
-# Initialize models
-embedder = SentenceTransformer('all-MiniLM-L6-v2')
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-model = genai.GenerativeModel('gemini-2.0-flash')
+# Initialize models lazily to save memory
+embedder = None
+catalog_embeddings = None
+model = None
+evaluator = None
 
-# Initialize evaluator if available
-if EVALUATION_AVAILABLE:
-    evaluator = Evaluator()
+def get_embedder():
+    """Lazy load embedder"""
+    global embedder, catalog_embeddings
+    if embedder is None:
+        print("Loading sentence transformer model...")
+        embedder = SentenceTransformer('all-MiniLM-L6-v2')
+        catalog_texts = [f"{item['name']} {item['description']} {' '.join(item.get('keys', []))}" for item in CATALOG]
+        catalog_embeddings = embedder.encode(catalog_texts)
+        print("Model loaded successfully")
+    return embedder, catalog_embeddings
 
-# Precompute embeddings
-catalog_texts = [f"{item['name']} {item['description']} {' '.join(item.get('keys', []))}" for item in CATALOG]
-catalog_embeddings = embedder.encode(catalog_texts)
+def get_gemini_model():
+    """Lazy load Gemini model"""
+    global model
+    if model is None:
+        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        model = genai.GenerativeModel('gemini-2.0-flash')
+    return model
+
+def get_evaluator():
+    """Lazy load evaluator"""
+    global evaluator
+    if EVALUATION_AVAILABLE and evaluator is None:
+        evaluator = Evaluator()
+    return evaluator
 
 # Request/Response models
 class Message(BaseModel):
@@ -136,7 +155,8 @@ Return ONLY this JSON format (no markdown, no explanation):
 If something is not mentioned, use null."""
 
     try:
-        response = model.generate_content(prompt)
+        gemini_model = get_gemini_model()
+        response = gemini_model.generate_content(prompt)
         # Clean response - remove markdown code blocks if present
         content = response.text.strip()
         if content.startswith('```json'):
@@ -187,8 +207,9 @@ def classify_intent(messages: List[Message], constraints: Dict) -> str:
 
 def semantic_search(query: str, constraints: Dict, top_k: int = 10) -> List[Dict]:
     """Search catalog using semantic similarity + filtering"""
-    query_embedding = embedder.encode([query])[0]
-    similarities = cosine_similarity([query_embedding], catalog_embeddings)[0]
+    embedder_model, embeddings = get_embedder()
+    query_embedding = embedder_model.encode([query])[0]
+    similarities = cosine_similarity([query_embedding], embeddings)[0]
     
     # Get top candidates
     top_indices = np.argsort(similarities)[::-1][:50]
@@ -340,7 +361,11 @@ def evaluate(request: Dict) -> Dict:
         "expected_keywords": ["java"]
     }
     """
-    if not EVALUATION_AVAILABLE or evaluator is None:
+    if not EVALUATION_AVAILABLE:
+        return {"error": "Evaluation module not available"}
+    
+    eval_instance = get_evaluator()
+    if eval_instance is None:
         return {"error": "Evaluation module not available"}
     
     response = request.get('response', {})
@@ -348,7 +373,7 @@ def evaluate(request: Dict) -> Dict:
     expected_behavior = request.get('expected_behavior', 'recommend')
     expected_keywords = request.get('expected_keywords', [])
     
-    evaluation = evaluator.comprehensive_evaluation(
+    evaluation = eval_instance.comprehensive_evaluation(
         response=response,
         constraints=constraints,
         expected_behavior=expected_behavior,
