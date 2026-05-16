@@ -8,7 +8,17 @@ from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 import google.generativeai as genai
 from dotenv import load_dotenv
-from evaluation import Evaluator
+
+# Try to import Evaluator, make it optional
+try:
+    from evaluation import Evaluator
+    evaluator = None  # Will initialize after catalog loads
+    EVALUATION_AVAILABLE = True
+except ImportError:
+    print("Warning: evaluation module not found. /evaluate endpoint will be disabled.")
+    Evaluator = None
+    evaluator = None
+    EVALUATION_AVAILABLE = False
 
 # Load environment variables
 load_dotenv()
@@ -23,7 +33,10 @@ with open("shl_product_catalog.json", "r", encoding="utf-8") as f:
 embedder = SentenceTransformer('all-MiniLM-L6-v2')
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 model = genai.GenerativeModel('gemini-2.0-flash')
-evaluator = Evaluator()
+
+# Initialize evaluator if available
+if EVALUATION_AVAILABLE:
+    evaluator = Evaluator()
 
 # Precompute embeddings
 catalog_texts = [f"{item['name']} {item['description']} {' '.join(item.get('keys', []))}" for item in CATALOG]
@@ -327,6 +340,9 @@ def evaluate(request: Dict) -> Dict:
         "expected_keywords": ["java"]
     }
     """
+    if not EVALUATION_AVAILABLE or evaluator is None:
+        return {"error": "Evaluation module not available"}
+    
     response = request.get('response', {})
     constraints = request.get('constraints', {})
     expected_behavior = request.get('expected_behavior', 'recommend')
